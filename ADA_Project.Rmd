@@ -1,0 +1,175 @@
+---
+title: "ADA Project"
+author: "Wenqing Zha"
+date: '2022-12-04'
+output: html_document
+---
+# Install packages
+```{r}
+pacman::p_load(haven, foreign, odds.n.ends, blorr, lmtest, car,  broom, tidyverse, jtools) 
+```
+
+# import dataset
+```{r}
+Demo1314 <- read_xpt(file = "DEMO_H.xpt")
+Demo0910 <- read_xpt(file = "DEMO_F.xpt")
+
+Fracture1314 <- read_xpt(file = "OSQ_H.xpt")
+Fracture0910 <- read_xpt(file = "OSQ_F.xpt")
+
+Outdoor1314 <- read_xpt(file = "DEQ_H.xpt")
+Outdoor0910 <- read_xpt(file = "DEQ_F.xpt")
+```
+
+# Select variables we need
+```{r}
+Demo1314 <- Demo1314 %>%
+  select(c("SEQN", "RIAGENDR", "RIDAGEYR", "RIDRETH1"))
+names(Demo1314) <- c("Participant", "Gender", "Age", "Race")
+
+Demo0910 <- Demo0910 %>%
+  select(c("SEQN", "RIAGENDR", "RIDAGEYR", "RIDRETH1"))
+names(Demo0910) <- c("Participant", "Gender", "Age", "Race")
+
+
+Fracture1314 <- Fracture1314 %>%
+  select(c("SEQN", "OSQ010A", "OSQ010B", "OSQ010C"))
+names(Fracture1314) <- c("Participant", "hip_frac", "wrist_frac", "spine_frac")
+
+Fracture0910 <- Fracture0910 %>%
+  select(c("SEQN", "OSQ010A", "OSQ010B", "OSQ010C"))
+names(Fracture0910) <- c("Participant", "hip_frac", "wrist_frac", "spine_frac")
+
+
+Outdoor1314 <- Outdoor1314 %>%
+  select(c("SEQN", "DED120", "DED125"))
+names(Outdoor1314) <- c("Participant", "Outdoor_workday", "Outdoor_non_workday")
+
+Outdoor0910 <- Outdoor0910 %>%
+  select(c("SEQN", "DED120", "DED125"))
+names(Outdoor0910) <- c("Participant", "Outdoor_workday", "Outdoor_non_workday")
+```
+
+# Merge 2009-2010 and 2013-2014 data
+```{r}
+Demo <- rbind(Demo0910, Demo1314)
+
+Fracture <- rbind(Fracture0910, Fracture1314)
+
+Outdoor <- rbind(Outdoor0910, Outdoor1314)
+
+NHANES <- full_join(Demo, Fracture, by="Participant")
+NHANES <- full_join(NHANES, Outdoor, by="Participant")
+```
+
+# select participants aged 45 or older
+```{r}
+NHANES <- filter(NHANES, Age >= 45)
+```
+
+```{r}
+# Gender
+table(NHANES$Gender)
+
+NHANES <- NHANES %>%
+  mutate(Gender_binary = case_when(Gender %in% c(2) ~ 0,
+                                     Gender %in% c(1) ~ 1),
+         Gender_binary = factor(Gender_binary, 0:1, c("Female", "Male")))
+
+table(NHANES$Gender_binary, useNA="always")
+
+# Race
+table(NHANES$Race)
+
+NHANES <- NHANES %>%
+  mutate(Race_recode = factor(Race, 1:5, c("Mexican American", "Other Hispanic", "Non-Hispanic White", "Non-Hispanic Black", "Other race")))
+
+table(NHANES$Race_recode, useNA="always")
+
+# Fracture
+NHANES <- NHANES %>%
+  mutate(NHANES, Fracture_recode = ifelse(hip_frac == 1 | wrist_frac == 1 | spine_frac == 1, 1, 0),
+         Fracture_recode = factor(Fracture_recode, 0:1, c("no fracture", "fracture")))
+
+table(NHANES$Fracture_recode, useNA="always")
+
+# Outdoor
+NHANES$Outdoor <- NHANES$Outdoor_workday + NHANES$Outdoor_non_workday
+```
+
+## Run a univariable (unadjusted) logistic model for outdoor as a continuous variable
+```{r}
+model1<- glm(Fracture_recode ~ Outdoor, data=NHANES, family="binomial")
+summary(model1) # get log results
+
+## interpretation: For every one unit in bmi, the log odds of diabetes increase 0.090185
+
+odds.n.ends(model1) # get OR results (and more!)
+```
+# Test the linearity assumption for Outdoor using the Box Tidwell test
+```{r}
+NHANES <- NHANES %>%
+  mutate(Outdoor.times.logOutdoor = Outdoor * log(Outdoor)) # create term to test linearity
+
+model2 <- glm(Fracture_recode ~ Outdoor + Outdoor.times.logOutdoor, data=NHANES, family="binomial") 
+
+summary(model2)
+
+# a NON-SIGNIFICANT (p > .05) coefficient means the assumption IS NOT VIOLATED. It is linearity.
+```
+## Adjust for age, gender, race category
+```{r}
+model3 <- glm(Fracture_recode ~ Outdoor + Gender + Age + Race, data=NHANES, family="binomial")
+summary(model3)
+
+odds.n.ends(model3)
+
+compareCoefs(model1, model3)
+```
+# Look at assumptions of multicollinearity using the vif function from the car package
+```{r}
+vif(model3)
+
+# VIF = 1, no correlation between the independent variable and the other variables
+```
+# Look for influential observations using Cook's distance. First we will plot
+```{r}
+# Plot Cooks's Distance
+plot(model3, which = 4, id.n = 3, col="red") 
+
+```
+## Next we will get Cook's D calculations for each obervation and some other stats using the augment function  from the Broom package.
+```{r}
+model3.data <- augment(model3) %>%  
+  mutate(index = 1:n()) 
+
+head(model3.data)
+```
+## Identify and exclude observations with a Cook's Distance greater than a cutoff, use 3 x the mean Cook's D 
+```{r}
+cuttoff <- mean(model3.data$.cooksd)*3 # defines cutoff variable
+
+NHANES_out <- model3.data %>% # excludes observations
+  filter(.cooksd<cuttoff)
+
+nrow(NHANES_out)/nrow(NHANES) # check percent kept
+```
+## Model Fracture and Outdoor logistic model with observations excluded
+```{r}
+model4 <- glm(Fracture_recode ~ Outdoor + Gender + Age + Race, data=NHANES, family="binomial")
+summary(model4)
+odds.n.ends(model4)
+```
+# Compare coefficients between models with and without influential observations 
+```{r}
+compareCoefs(model3, model4) 
+```
+```{r}
+odds.n.ends(model4, predProbPlot=TRUE, rocPlot = TRUE)
+```
+
+
+
+
+
+
